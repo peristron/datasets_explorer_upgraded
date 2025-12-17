@@ -1,4 +1,4 @@
-# streamlit run dataset_explorer_v14.py
+# streamlit run dataset_explorer_v15.py
 import streamlit as st
 import pandas as pd
 import os
@@ -92,12 +92,16 @@ def init_session_state():
 init_session_state()
 
 # =============================================================================
-# 3. AUTHENTICATION LOGIC
+# 3. AUTHENTICATION LOGIC (FIXED FOR CASE SENSITIVITY)
 # =============================================================================
+
+def get_secret(key_name):
+    """Helper to check both lowercase and uppercase keys in secrets."""
+    return st.secrets.get(key_name) or st.secrets.get(key_name.upper())
 
 def perform_login():
     """Verifies password against Streamlit secrets or allows Dev mode."""
-    pwd_secret = st.secrets.get("app_password")
+    pwd_secret = get_secret("app_password")
     
     # Dev Mode: If no secret is configured, allow access
     if not pwd_secret:
@@ -387,10 +391,10 @@ def create_orbital_map(df: pd.DataFrame, target_node: str = None) -> go.Figure:
                 # Visual Logic for Dataset
                 if target_node:
                     if ds_name == target_node:
-                        # TARGET
-                        node_color.append('#00FF00') # Keep Green
-                        node_size.append(50)         # INCREASED: Massive size to pop out
-                        node_line_width.append(5); node_line_color.append('white') # INCREASED: Thick white border
+                        # TARGET - INCREASED VISIBILITY
+                        node_color.append('#00FF00') # Bright Green
+                        node_size.append(50)         # Large Size
+                        node_line_width.append(5); node_line_color.append('white') # Thick Border
                     elif ds_name in active_neighbors:
                         # NEIGHBOR
                         node_color.append('#00CCFF') # Blue
@@ -471,60 +475,38 @@ def create_orbital_map(df: pd.DataFrame, target_node: str = None) -> go.Figure:
 # =============================================================================
 
 def generate_manual_sql(selected_datasets: List[str], df: pd.DataFrame) -> str:
-    """
-    Generates a deterministic SQL JOIN query based on the graph relationships.
-    Uses a 'Greedy' approach: connect each new table to the existing joined cluster.
-    """
+    """Generates a deterministic SQL JOIN query."""
     if len(selected_datasets) < 2:
-        return "-- Please select at least 2 datasets to generate a JOIN."
+        return "-- Please select at least 2 datasets."
     
-    # 1. Build the Full Connection Graph
+    # 1. Build Graph
     G_full = nx.Graph()
     joins = get_possible_joins(df)
     for _, r in joins.iterrows():
-        # Store the Join Key as an edge attribute
         G_full.add_edge(r['dataset_name_fk'], r['dataset_name_pk'], key=r['column_name'])
 
-    # 2. Initialize Query
-    base_table = selected_datasets[0]
-    # Create simple aliases (t1, t2, etc.)
+    # 2. Init Query
+    base = selected_datasets[0]
     aliases = {ds: f"t{i+1}" for i, ds in enumerate(selected_datasets)}
     
-    sql_lines = [f"SELECT TOP 100", f"    {aliases[base_table]}.*"]
-    sql_lines.append(f"FROM {base_table} {aliases[base_table]}")
+    sql = [f"SELECT TOP 100", f"    {aliases[base]}.*"]
+    sql.append(f"FROM {base} {aliases[base]}")
     
-    # Set of tables already added to the query
-    joined_tables = {base_table}
-    
-    # 3. Iterate through remaining tables
-    remaining_tables = selected_datasets[1:]
-    
-    for current_table in remaining_tables:
-        found_connection = False
-        
-        # Check if current_table connects to ANY table already in the query
-        for existing_table in joined_tables:
-            if G_full.has_edge(current_table, existing_table):
-                key = G_full[current_table][existing_table]['key']
-                
-                sql_lines.append(
-                    f"LEFT JOIN {current_table} {aliases[current_table]} "
-                    f"ON {aliases[existing_table]}.{key} = {aliases[current_table]}.{key}"
-                )
-                
-                joined_tables.add(current_table)
-                found_connection = True
+    joined = {base}
+    for curr in selected_datasets[1:]:
+        found = False
+        for existing in joined:
+            if G_full.has_edge(curr, existing):
+                key = G_full[curr][existing]['key']
+                sql.append(f"LEFT JOIN {curr} {aliases[curr]} ON {aliases[existing]}.{key} = {aliases[curr]}.{key}")
+                joined.add(curr)
+                found = True
                 break
-        
-        if not found_connection:
-            # Fallback for unconnected tables
-            sql_lines.append(
-                f"CROSS JOIN {current_table} {aliases[current_table]} "
-                f"-- ⚠️ No direct relationship found in metadata"
-            )
-            joined_tables.add(current_table)
+        if not found:
+            sql.append(f"CROSS JOIN {curr} {aliases[curr]} -- ⚠️ No direct link")
+            joined.add(curr)
             
-    return "\n".join(sql_lines)
+    return "\n".join(sql)
 
 # =============================================================================
 # 7. VIEW CONTROLLERS (MODULAR UI)
@@ -592,7 +574,6 @@ def render_map_view(df: pd.DataFrame):
     c1, c2 = st.columns([3, 1])
     
     with c1:
-        # Uses ORBITAL MAP (Solar System) which user preferred over Spring Physics
         fig = create_orbital_map(df, target_val)
         st.plotly_chart(fig, use_container_width=True)
         
@@ -677,14 +658,15 @@ def render_ai_view(df: pd.DataFrame):
         st.markdown("#### AI Settings")
         prov = st.selectbox("Provider", ["OpenAI", "xAI"])
         
-        # API Key Input
-        key_input = st.text_input("API Key", type="password")
+        # CHECK SECRETS CASE INSENSITIVELY (Smart Login)
+        key_name = "openai_api_key" if prov == "OpenAI" else "xai_api_key"
+        secret_key = get_secret(key_name)
         
-        # Prefer secret, fallback to input
-        if prov == "OpenAI":
-            api_key = st.secrets.get("openai_api_key") or key_input
+        if secret_key:
+            st.success("✅ Key loaded from Secrets")
+            api_key = secret_key
         else:
-            api_key = st.secrets.get("xai_api_key") or key_input
+            api_key = st.text_input("API Key", type="password")
             
         use_full = st.checkbox("Use Full Database Context", value=True, help="Sends entire schema to AI (more expensive, smarter).")
         
