@@ -1,4 +1,4 @@
-# streamlit run dataset_explorer_fixed.py
+# streamlit run dataset_explorer_fixed_v3.py
 import streamlit as st
 import pandas as pd
 import os
@@ -36,7 +36,6 @@ if 'map_view_mode' not in st.session_state: st.session_state['map_view_mode'] = 
 def perform_login():
     """Callback to verify password."""
     pwd = st.secrets.get("app_password")
-    # If no password set in secrets, allow bypass (for demo purposes)
     if not pwd:
         st.session_state['authenticated'] = True
         return
@@ -173,7 +172,6 @@ def scrape_and_save_from_list(url_list):
 @st.cache_data
 def load_data():
     if os.path.exists('dataset_metadata.csv'):
-        # Check if file is empty or too small
         if os.path.getsize('dataset_metadata.csv') < 10:
             return pd.DataFrame()
         return pd.read_csv('dataset_metadata.csv').fillna('')
@@ -271,7 +269,7 @@ def build_constellation_map(df, show_connections=False):
 
     node_trace = go.Scatter(
         x=node_x, y=node_y, mode='markers', hoverinfo='text', text=node_texts,
-        marker=dict(showscale=False, color=node_colors, size=node_sizes, line_width=1, line_color='white')
+        marker=dict(showscale=False, color=node_colors, size=node_sizes, line=dict(width=1, color='white'))
     )
     
     cat_x = [pos[n][0] for n in G.nodes() if G.nodes[n]['type'] == 'category']
@@ -283,10 +281,13 @@ def build_constellation_map(df, show_connections=False):
         textfont=dict(color='#FFD700', size=12, family="sans serif"), hoverinfo='none'
     )
 
+    # UPDATED: Replaced deprecated titlefont with title=dict(font=dict())
     fig = go.Figure(data=[edge_trace, node_trace, text_trace],
              layout=go.Layout(
-                title='<br>Full Dataset Constellation Map',
-                titlefont=dict(size=16),
+                title=dict(
+                    text='<br>Full Dataset Constellation Map',
+                    font=dict(size=16)
+                ),
                 showlegend=False,
                 hovermode='closest',
                 margin=dict(b=20,l=5,r=5,t=40),
@@ -385,7 +386,6 @@ with st.sidebar:
             with st.spinner(f"Scraping {len(url_list)} pages..."):
                 df_new = scrape_and_save_from_list(url_list)
                 st.session_state['scrape_msg'] = f"Success: {df_new['dataset_name'].nunique()} Datasets"
-                # !!! CRITICAL FIX: Clear cache so the new file is read on rerun !!!
                 load_data.clear()
                 st.rerun()
 
