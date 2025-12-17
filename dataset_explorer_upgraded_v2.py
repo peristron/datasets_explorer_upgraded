@@ -388,9 +388,9 @@ def create_orbital_map(df: pd.DataFrame, target_node: str = None) -> go.Figure:
                 if target_node:
                     if ds_name == target_node:
                         # TARGET
-                        node_color.append('#00FF00') # Bright Green
-                        node_size.append(20)
-                        node_line_width.append(2); node_line_color.append('white')
+                        node_color.append('#00FF00') # Keep Green
+                        node_size.append(50)         # INCREASED: Massive size to pop out
+                        node_line_width.append(5); node_line_color.append('white') # INCREASED: Thick white border
                     elif ds_name in active_neighbors:
                         # NEIGHBOR
                         node_color.append('#00CCFF') # Blue
