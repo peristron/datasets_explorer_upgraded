@@ -1,4 +1,4 @@
-# streamlit run dataset_explorer_v6.py
+# streamlit run dataset_explorer_v9.py
 import streamlit as st
 import pandas as pd
 import os
@@ -7,34 +7,100 @@ from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor
 import networkx as nx
 import plotly.graph_objects as go
+import plotly.express as px
 import openai
 import re
 import logging
-import math
+from typing import List, Dict, Tuple, Optional, Set
 import numpy as np
+import math
 
-# ==========================================
-# CONFIGURATION & LOGGING
-# ==========================================
-st.set_page_config(page_title="Brightspace Datasets Explorer", layout="wide", page_icon="🌌")
+# =============================================================================
+# 1. APP CONFIGURATION & STYLING
+# =============================================================================
 
-logging.basicConfig(filename='scraper.log', filemode='w', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+st.set_page_config(
+    page_title="Brightspace Data Universe",
+    layout="wide",
+    page_icon="🌌",
+    initial_sidebar_state="expanded"
+)
+
+# Configure Logging
+logging.basicConfig(
+    filename='scraper.log',
+    filemode='w',
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 requests.packages.urllib3.disable_warnings(requests.packages.urllib3.exceptions.InsecureRequestWarning)
 
-# ==========================================
-# SESSION STATE & AUTH
-# ==========================================
-if 'total_cost' not in st.session_state: st.session_state['total_cost'] = 0.0
-if 'total_tokens' not in st.session_state: st.session_state['total_tokens'] = 0
-if 'authenticated' not in st.session_state: st.session_state['authenticated'] = False
-if 'auth_error' not in st.session_state: st.session_state['auth_error'] = False
+# Custom CSS for Professional UI
+st.markdown("""
+<style>
+    /* Metric Cards Styling */
+    div[data-testid="stMetric"] {
+        background-color: #1E232B;
+        border: 1px solid #30363D;
+        padding: 15px;
+        border-radius: 8px;
+        color: white;
+    }
+    div[data-testid="stMetricLabel"] { color: #8B949E; }
+    div[data-testid="stMetricValue"] { color: #58A6FF; font-size: 24px; }
+    
+    /* Tabs Styling */
+    .stTabs [data-baseweb="tab-list"] { gap: 8px; }
+    .stTabs [data-baseweb="tab"] {
+        background-color: #0E1117;
+        border-radius: 4px;
+        padding: 8px 16px;
+        color: #C9D1D9;
+        border: 1px solid transparent;
+    }
+    .stTabs [data-baseweb="tab"][aria-selected="true"] {
+        background-color: #238636;
+        color: white;
+        border-color: #30363D;
+    }
+    
+    /* Code Blocks */
+    .stCode { font-family: 'Fira Code', monospace; }
+</style>
+""", unsafe_allow_html=True)
+
+# =============================================================================
+# 2. SESSION STATE MANAGEMENT
+# =============================================================================
+
+def init_session_state():
+    """Initializes Streamlit session state variables if they don't exist."""
+    defaults = {
+        'authenticated': False,
+        'auth_error': False,
+        'messages': [],
+        'view_mode': 'Universe Map'
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+init_session_state()
+
+# =============================================================================
+# 3. AUTHENTICATION LOGIC
+# =============================================================================
 
 def perform_login():
+    """Verifies password against Streamlit secrets."""
     pwd_secret = st.secrets.get("app_password")
+    
+    # If no secret is configured, allow access (Dev Mode)
     if not pwd_secret:
-        # If no secret set, allow dev access
         st.session_state['authenticated'] = True
         return
+
+    # Check input
     if st.session_state.get("password_input") == pwd_secret:
         st.session_state['authenticated'] = True
         st.session_state['auth_error'] = False
@@ -43,17 +109,14 @@ def perform_login():
         st.session_state['authenticated'] = False
 
 def logout():
+    """Resets authentication state."""
     st.session_state['authenticated'] = False
     st.session_state['password_input'] = ""
 
-def clear_all_selections():
-    for key in list(st.session_state.keys()):
-        if key.startswith("sel_") or key == "global_search":
-            st.session_state[key] = []
+# =============================================================================
+# 4. SCRAPER LOGIC (ROBUST)
+# =============================================================================
 
-# ==========================================
-# DATA LOGIC (SCRAPER & LOADER)
-# ==========================================
 DEFAULT_URLS = """
 https://community.d2l.com/brightspace/kb/articles/4752-accommodations-data-sets
 https://community.d2l.com/brightspace/kb/articles/4712-activity-feed-data-sets
@@ -96,452 +159,554 @@ https://community.d2l.com/brightspace/kb/articles/4740-users-data-sets
 https://community.d2l.com/brightspace/kb/articles/4541-virtual-classroom-data-sets
 """.strip()
 
-def parse_urls_from_text_area(text_block):
-    urls = [line.strip() for line in text_block.split('\n') if line.strip()]
-    return sorted(list(set([u for u in urls if u.startswith('http')])))
-
-def scrape_table(url, category_name):
+def scrape_table(url: str, category_name: str) -> List[Dict]:
+    """Scrapes a single D2L KB page for dataset tables."""
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
         response = requests.get(url, headers=headers, timeout=15, verify=False)
-        if response.status_code != 200: return []
+        if response.status_code != 200:
+            return []
+            
         soup = BeautifulSoup(response.content, 'html.parser')
         data = []
-        elements = soup.find_all(['h2', 'h3', 'table'])
         current_dataset = category_name
+        
+        # Iterate through headers and tables to map Datasets
+        elements = soup.find_all(['h2', 'h3', 'table'])
         for element in elements:
-            if element.name in ['h2', 'h3']: 
+            if element.name in ['h2', 'h3']:
                 text = element.text.strip()
-                if len(text) > 3: current_dataset = text.lower()
+                if len(text) > 3: 
+                    current_dataset = text.lower()
+                    
             elif element.name == 'table':
+                # Extract headers
                 table_headers = [th.text.strip().lower().replace(' ', '_') for th in element.find_all('th')]
-                if not table_headers or not any(x in table_headers for x in ['type', 'description', 'data_type']): continue
+                
+                # Validation: ensure this is a metadata table
+                if not table_headers or not any(x in table_headers for x in ['type', 'description', 'data_type']):
+                    continue
+                
+                # Extract Rows
                 for row in element.find_all('tr'):
                     columns_ = row.find_all('td')
-                    if len(columns_) < len(table_headers): continue 
+                    if len(columns_) < len(table_headers): 
+                        continue
+                    
                     entry = {}
                     for i, header in enumerate(table_headers):
-                        if i < len(columns_): entry[header] = columns_[i].text.strip()
+                        if i < len(columns_): 
+                            entry[header] = columns_[i].text.strip()
+                    
+                    # Normalize Keys (handle variations in D2L docs)
                     header_map = {'field': 'column_name', 'name': 'column_name', 'type': 'data_type'}
-                    entry = {header_map.get(k, k): v for k, v in entry.items()}
-                    if 'column_name' in entry and entry['column_name']:
-                        entry['dataset_name'] = current_dataset
-                        entry['category'] = category_name
-                        entry['url'] = url 
-                        data.append(entry)
+                    clean_entry = {}
+                    for k, v in entry.items():
+                        clean_key = header_map.get(k, k)
+                        clean_entry[clean_key] = v
+                    
+                    if 'column_name' in clean_entry and clean_entry['column_name']:
+                        clean_entry['dataset_name'] = current_dataset
+                        clean_entry['category'] = category_name
+                        clean_entry['url'] = url
+                        data.append(clean_entry)
+                        
         return data
-    except Exception: return []
+    except Exception as e:
+        logging.error(f"Failed to scrape {url}: {e}")
+        return []
 
-def scrape_and_save_from_list(url_list):
+def scrape_and_save(urls: List[str]) -> pd.DataFrame:
+    """Manages the ThreadPool for scraping and saves result to CSV."""
     all_data = []
     progress_bar = st.progress(0, "Initializing Scraper...")
-    def get_category_from_url(url):
-        return re.sub(r'^\d+\s*', '', os.path.basename(url).split('?')[0].replace('-data-sets', '').replace('-', ' ')).lower()
     
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        args = [(url, get_category_from_url(url)) for url in url_list]
+    # Helper to guess category from URL
+    def extract_category(url):
+        filename = os.path.basename(url).split('?')[0]
+        clean_name = re.sub(r'^\d+\s*', '', filename)
+        return clean_name.replace('-data-sets', '').replace('-', ' ').lower()
+    
+    # Concurrent Scraping
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        args = [(url, extract_category(url)) for url in urls]
         future_to_url = {executor.submit(scrape_table, *arg): arg[0] for arg in args}
+        
         for i, future in enumerate(future_to_url):
             try:
-                all_data.extend(future.result())
-            except Exception: pass
-            progress_bar.progress((i + 1) / len(url_list), f"Scraping {i+1}/{len(url_list)}...")
+                result = future.result()
+                all_data.extend(result)
+            except Exception as e:
+                logging.error(f"Thread error: {e}")
+            
+            progress_bar.progress((i + 1) / len(urls), f"Scraping {i+1}/{len(urls)}...")
+            
     progress_bar.empty()
-    if not all_data: return pd.DataFrame()
 
+    if not all_data:
+        return pd.DataFrame()
+
+    # Post-Processing
     df = pd.DataFrame(all_data)
-    expected_cols = ['category', 'dataset_name', 'column_name', 'data_type', 'description', 'key', 'url']
-    for col in expected_cols:
-        if col not in df.columns: df[col] = ''
     df = df.fillna('')
+    
+    # Formatting
     df['dataset_name'] = df['dataset_name'].astype(str).str.title()
     df['category'] = df['category'].astype(str).str.title()
+    
+    # Logic Flags
     df['is_primary_key'] = df['key'].astype(str).str.contains(r'\bpk\b', case=False, regex=True)
     df['is_foreign_key'] = df['key'].astype(str).str.contains(r'\bfk\b', case=False, regex=True)
+    
     df.to_csv('dataset_metadata.csv', index=False)
     return df
 
 @st.cache_data
-def load_data():
+def load_data() -> pd.DataFrame:
+    """Loads the cached CSV data."""
     if os.path.exists('dataset_metadata.csv') and os.path.getsize('dataset_metadata.csv') > 10:
         return pd.read_csv('dataset_metadata.csv').fillna('')
     return pd.DataFrame()
 
 @st.cache_data
-def find_pk_fk_joins(df, selected_datasets=None):
+def get_joins(df: pd.DataFrame) -> pd.DataFrame:
+    """Calculates all possible PK/FK relationships."""
     if df.empty: return pd.DataFrame()
+    
     pks = df[df['is_primary_key'] == True]
     fks = df[df['is_foreign_key'] == True]
-    if selected_datasets: fks = fks[fks['dataset_name'].isin(selected_datasets)]
+    
     if pks.empty or fks.empty: return pd.DataFrame()
+    
     merged = pd.merge(fks, pks, on='column_name', suffixes=('_fk', '_pk'))
+    # Filter self-joins
     joins = merged[merged['dataset_name_fk'] != merged['dataset_name_pk']]
-    if joins.empty: return pd.DataFrame()
-    result = joins[['dataset_name_fk', 'column_name', 'dataset_name_pk']]
-    result.columns = ['Source', 'Key', 'Target']
-    return result.drop_duplicates()
+    return joins
 
-# ==========================================
-# VISUALIZATION ENGINES
-# ==========================================
+# =============================================================================
+# 5. VISUALIZATION ENGINE (HYBRID MAP)
+# =============================================================================
 
 @st.cache_data
-def build_game_map(df, target_dataset=None):
+def create_hybrid_map(df: pd.DataFrame, target_node: str = None) -> go.Figure:
     """
-    The Clean, Game-Like HUD Map (V5 Style).
-    Hidden lines by default. Locks on and shows fields when target selected.
+    Generates the Interactive Universe Map using Plotly.
+    Uses 'Clustered Spring Layout' for organic node placement.
+    Uses 'HUD Logic' to only show lines when a Target is selected.
     """
-    categories = sorted(df['category'].unique())
-    datasets = df[['dataset_name', 'category', 'description']].drop_duplicates('dataset_name')
-    joins = find_pk_fk_joins(df) # Global joins
-
-    # Layout Physics
-    pos = {}
-    center_x, center_y = 0, 0
-    cat_radius = 20
+    if df.empty: return go.Figure()
     
-    cat_step = 2 * math.pi / len(categories) if categories else 1
+    # 1. Build NetworkX Graph for Layout Calculation
+    G = nx.Graph()
+    
+    # Aggregate data to get 1 node per dataset
+    dataset_info = df.groupby('dataset_name').agg({
+        'category': 'first',
+        'column_name': 'count'
+    }).reset_index()
+    
+    for _, row in dataset_info.iterrows():
+        G.add_node(row['dataset_name'], category=row['category'], size=row['column_name'])
+
+    # 2. Physics: Clustered Spring Layout
+    # This creates the "Cloud" look where datasets hover near their categories
+    categories = sorted(list(set(nx.get_node_attributes(G, 'category').values())))
+    
+    # Generate colors
+    colors = px.colors.qualitative.Set3 + px.colors.qualitative.Pastel1
+    cat_colors = {cat: colors[i % len(colors)] for i, cat in enumerate(categories)}
+    
+    # Seed category positions in a circle
+    n_cats = len(categories)
+    cat_pos = {}
+    radius = 4
     for i, cat in enumerate(categories):
-        angle = i * cat_step
-        cx = center_x + cat_radius * math.cos(angle)
-        cy = center_y + cat_radius * math.sin(angle)
-        pos[cat] = (cx, cy)
+        angle = 2 * np.pi * i / n_cats
+        cat_pos[cat] = (np.cos(angle) * radius, np.sin(angle) * radius)
         
-        # Place datasets
-        cat_ds = datasets[datasets['category'] == cat]
-        ds_count = len(cat_ds)
-        if ds_count > 0:
-            ds_radius = 4
-            ds_step = 2 * math.pi / ds_count
-            for j, (_, row) in enumerate(cat_ds.iterrows()):
-                ds_name = row['dataset_name']
-                ds_angle = j * ds_step
-                dx = cx + ds_radius * math.cos(ds_angle)
-                dy = cy + ds_radius * math.sin(ds_angle)
-                pos[ds_name] = (dx, dy)
+    # Initial node positions (jittered around category center)
+    initial_pos = {}
+    for node in G.nodes():
+        cat = G.nodes[node]['category']
+        base_x, base_y = cat_pos[cat]
+        initial_pos[node] = (
+            base_x + np.random.uniform(-0.8, 0.8), 
+            base_y + np.random.uniform(-0.8, 0.8)
+        )
 
-    # Active Focus Logic
-    active_nodes = set()
+    # Run Physics Simulation
+    pos = nx.spring_layout(G, k=1.2, iterations=80, pos=initial_pos, seed=42)
+
+    # 3. Determine Active Connections (HUD Logic)
     active_edges = []
+    active_neighbors = set()
     
-    if target_dataset and target_dataset != "None":
-        active_nodes.add(target_dataset)
-        # Find Neighbors
-        out_ = joins[joins['Source'] == target_dataset]
-        for _, r in out_.iterrows():
-            active_nodes.add(r['Target'])
-            active_edges.append((r['Source'], r['Target'], r['Key']))
+    if target_node:
+        joins = get_joins(df)
         
-        in_ = joins[joins['Target'] == target_dataset]
-        for _, r in in_.iterrows():
-            active_nodes.add(r['Source'])
-            active_edges.append((r['Source'], r['Target'], r['Key']))
-
-    # Build Traces
-    node_x, node_y, node_text, node_color, node_size = [], [], [], [], []
-    cat_x, cat_y, cat_text = [], [], []
-
-    # Categories
-    for cat in categories:
-        x, y = pos[cat]
-        is_dim = (target_dataset and target_dataset != "None")
-        cat_x.append(x); cat_y.append(y + 2.5); cat_text.append(cat)
-        node_x.append(x); node_y.append(y)
-        node_text.append(f"Category: {cat}")
-        node_color.append('rgba(255, 215, 0, 0.2)' if is_dim else 'rgba(255, 215, 0, 1)')
-        node_size.append(30)
-
-    # Datasets
-    for _, row in datasets.iterrows():
-        ds = row['dataset_name']
-        if ds in pos:
-            x, y = pos[ds]
-            if target_dataset and target_dataset != "None":
-                if ds == target_dataset:
-                    color, size, opacity = '#00FF00', 20, 1
-                elif ds in active_nodes:
-                    color, size, opacity = '#00CCFF', 15, 1
-                else:
-                    color, size, opacity = '#333333', 8, 0.3
-            else:
-                color, size, opacity = '#00CCFF', 10, 0.8
+        # Outgoing connections (Target -> Others)
+        out_ = joins[joins['dataset_name_fk'] == target_node]
+        for _, r in out_.iterrows():
+            active_edges.append((target_node, r['dataset_name_pk'], r['column_name']))
+            active_neighbors.add(r['dataset_name_pk'])
             
-            node_x.append(x); node_y.append(y)
-            node_text.append(f"{ds}<br><i>{str(row['description'])[:80]}...</i>")
-            node_color.append(color)
-            node_size.append(size)
+        # Incoming connections (Others -> Target)
+        in_ = joins[joins['dataset_name_pk'] == target_node]
+        for _, r in in_.iterrows():
+            active_edges.append((r['dataset_name_fk'], target_node, r['column_name']))
+            active_neighbors.add(r['dataset_name_fk'])
 
-    # Edges & Labels
+    # 4. Draw Edges (Lines)
     edge_x, edge_y = [], []
-    label_x, label_y, label_txt = [], [], []
-
-    if active_edges:
-        for s, t, k in active_edges:
-            if s in pos and t in pos:
-                x0, y0 = pos[s]
-                x1, y1 = pos[t]
-                edge_x.extend([x0, x1, None])
-                edge_y.extend([y0, y1, None])
-                label_x.append((x0 + x1) / 2)
-                label_y.append((y0 + y1) / 2)
-                label_txt.append(k)
-
-    traces = []
-    # Edges
-    traces.append(go.Scatter(x=edge_x, y=edge_y, mode='lines', line=dict(width=2, color='#00FF00'), hoverinfo='none'))
-    # Edge Labels
-    if label_txt:
-        traces.append(go.Scatter(
-            x=label_x, y=label_y, mode='text', text=label_txt,
-            textfont=dict(color='#00FF00', size=12, family="monospace", weight="bold"), hoverinfo='none'
-        ))
-    # Nodes
-    traces.append(go.Scatter(
-        x=node_x, y=node_y, mode='markers', text=node_text, hoverinfo='text',
-        marker=dict(color=node_color, size=node_size, line=dict(width=1, color='white'))
-    ))
-    # Cat Labels
-    traces.append(go.Scatter(
-        x=cat_x, y=cat_y, mode='text', text=cat_text,
-        textfont=dict(color='gold', size=10), hoverinfo='none'
-    ))
-
-    layout = go.Layout(
-        title=dict(text="Data Ecosystem Command", font=dict(color="white")),
-        showlegend=False, hovermode='closest', margin=dict(b=0,l=0,r=0,t=40),
-        plot_bgcolor='#0E1117', paper_bgcolor='#0E1117',
-        xaxis=dict(showgrid=False, zeroline=False, visible=False),
-        yaxis=dict(showgrid=False, zeroline=False, visible=False),
-        height=750
-    )
-    return go.Figure(data=traces, layout=layout)
-
-@st.cache_data
-def build_focus_graph(selected_datasets, join_data):
-    """
-    The V4 Style Graph used for the 'Focus Explorer' tab.
-    Calculates springs only for selected nodes.
-    """
-    G = nx.DiGraph()
-    # Add nodes
-    for ds in selected_datasets: G.add_node(ds)
-    # Add edges
-    if not join_data.empty:
-        for _, row in join_data.iterrows():
-            s, t = row['Source'], row['Target']
-            if s in selected_datasets and t in selected_datasets:
-                G.add_edge(s, t, label=row['Key'])
-
-    if G.number_of_nodes() == 0: return None
+    label_x, label_y, label_text = [], [], []
     
-    pos = nx.spring_layout(G, k=0.7, iterations=60)
-    edge_x, edge_y, label_x, label_y, label_text = [], [], [], [], []
+    for s, t, k in active_edges:
+        if s in pos and t in pos:
+            x0, y0 = pos[s]
+            x1, y1 = pos[t]
+            
+            # Line coordinates
+            edge_x.extend([x0, x1, None])
+            edge_y.extend([y0, y1, None])
+            
+            # Label coordinates (Midpoint)
+            label_x.append((x0 + x1) / 2)
+            label_y.append((y0 + y1) / 2)
+            label_text.append(k)
 
-    for u, v, data in G.edges(data=True):
-        x0, y0 = pos[u]
-        x1, y1 = pos[v]
-        edge_x.extend([x0, x1, None])
-        edge_y.extend([y0, y1, None])
-        label_x.append((x0 + x1) / 2)
-        label_y.append((y0 + y1) / 2)
-        label_text.append(data.get('label', '?'))
-
-    edge_trace = go.Scatter(x=edge_x, y=edge_y, line=dict(width=1, color='#888'), hoverinfo='none', mode='lines')
+    # Trace: Edges
+    edge_trace = go.Scatter(
+        x=edge_x, y=edge_y,
+        mode='lines',
+        line=dict(width=2, color='#58A6FF'), # Bright Blue
+        hoverinfo='none'
+    )
+    
+    # Trace: Edge Labels (Key names)
     label_trace = go.Scatter(
-        x=label_x, y=label_y, mode='text', text=label_text,
-        textfont=dict(color='#00CCFF', size=11, family="monospace"), hoverinfo='none'
+        x=label_x, y=label_y,
+        mode='text',
+        text=label_text,
+        textfont=dict(color='#58A6FF', size=11, family="monospace", weight="bold"),
+        hoverinfo='none'
     )
+
+    # 5. Draw Nodes (Dots)
+    node_x, node_y, node_text, node_color, node_size, node_line = [], [], [], [], [], []
     
-    node_x, node_y, node_text = [], [], []
     for node in G.nodes():
         x, y = pos[node]
+        cat = G.nodes[node]['category']
         node_x.append(x)
         node_y.append(y)
-        node_text.append(node)
-
-    node_trace = go.Scatter(
-        x=node_x, y=node_y, mode='markers+text',
-        text=node_text, textposition="top center",
-        marker=dict(color='#FF4B4B', size=25, line=dict(width=2, color='white'))
-    )
-    
-    return go.Figure(data=[edge_trace, label_trace, node_trace], layout=go.Layout(
-        showlegend=False, hovermode='closest', margin=dict(b=0,l=0,r=0,t=0),
-        xaxis=dict(showgrid=False, zeroline=False, visible=False),
-        yaxis=dict(showgrid=False, zeroline=False, visible=False),
-        height=600, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)'
-    ))
-
-# ==========================================
-# MAIN UI
-# ==========================================
-df = load_data()
-
-with st.sidebar:
-    st.title("BDS Explorer")
-    if df.empty:
-        st.error("No data loaded.")
-    else:
-        st.success(f"{df['dataset_name'].nunique()} Datasets Online")
-    
-    with st.expander("🛠️ Scraper & Admin"):
-        pasted_text = st.text_area("URLs", height=60, value=DEFAULT_URLS)
-        if st.button("Update Data"):
-            url_list = parse_urls_from_text_area(pasted_text)
-            scrape_and_save_from_list(url_list)
-            load_data.clear()
-            st.rerun()
-
-    if not st.session_state['authenticated']:
-        st.divider()
-        st.caption("Locked Features")
-        st.text_input("Password", type="password", key="password_input", on_change=perform_login)
-        if st.session_state['auth_error']: st.error("Access Denied")
-    else:
-        st.divider()
-        st.success("Unlocked")
-        if st.button("Logout"): logout(); st.rerun()
-
-if df.empty:
-    st.title("Brightspace Datasets Explorer")
-    st.warning("Please use the Sidebar Scraper to load data.")
-    st.stop()
-
-# TABBED INTERFACE
-tab_cmd, tab_sql, tab_ai = st.tabs(["🛰️ Command Center (Map)", "🔎 Focus & SQL", "🤖 Full AI Chat"])
-
-# ----------------------------------------------------
-# TAB 1: COMMAND CENTER (Game Map from V5)
-# ----------------------------------------------------
-with tab_cmd:
-    col_map, col_info = st.columns([3, 1])
-    
-    with col_map:
-        all_ds = ["None"] + sorted(df['dataset_name'].unique())
-        target = st.selectbox("🎯 Select Target Dataset to Map Connections:", all_ds, index=0)
-        fig_game = build_game_map(df, target_dataset=target if target != "None" else None)
-        st.plotly_chart(fig_game, use_container_width=True)
-
-    with col_info:
-        st.markdown("#### 📋 Target Schema")
-        if target and target != "None":
-            st.info(f"Analyzing: **{target}**")
-            subset = df[df['dataset_name'] == target]
-            if not subset.empty:
-                for _, row in subset.iterrows():
-                    icon = "🔑" if row['is_primary_key'] else "🔗" if row['is_foreign_key'] else "📄"
-                    st.markdown(f"**{icon} {row['column_name']}**")
-                    st.caption(f"{row['data_type']}")
-                    st.divider()
+        
+        # Visual Logic
+        base_color = cat_colors.get(cat, '#888')
+        
+        if target_node:
+            # Focused Mode
+            if node == target_node:
+                node_color.append('#58A6FF') # Highlight Target
+                node_size.append(25)
+                node_line.append(dict(width=3, color='white'))
+            elif node in active_neighbors:
+                node_color.append(base_color) # Keep neighbor color
+                node_size.append(18)
+                node_line.append(dict(width=2, color='white'))
+            else:
+                # Dim everyone else
+                node_color.append('rgba(50,50,50,0.3)')
+                node_size.append(8)
+                node_line.append(dict(width=0, color='black'))
         else:
-            st.caption("Select a dataset to view its immediate connections and schema.")
-
-# ----------------------------------------------------
-# TAB 2: FOCUS EXPLORER & SQL (From V4)
-# ----------------------------------------------------
-with tab_sql:
-    st.subheader("Ad-Hoc SQL Builder")
-    
-    # Selectors
-    col_sel1, col_sel2 = st.columns([3, 1])
-    with col_sel1:
-        sel_ds = st.multiselect("Select Datasets to Join:", sorted(df['dataset_name'].unique()))
-    with col_sel2:
-        if st.button("Clear Selections"): st.rerun()
+            # Default Mode (All visible)
+            node_color.append(base_color)
+            node_size.append(10 + min(G.nodes[node]['size'] * 0.2, 10))
+            node_line.append(dict(width=1, color='rgba(255,255,255,0.5)'))
         
-    if sel_ds:
-        col_graph, col_code = st.columns([3, 2])
-        
-        # 1. Focus Graph
-        with col_graph:
-            joins_sub = find_pk_fk_joins(df, sel_ds)
-            fig_foc = build_focus_graph(sel_ds, joins_sub)
-            if fig_foc: st.plotly_chart(fig_foc, use_container_width=True)
-            else: st.info("No direct relationships found among selections.")
+        # Tooltip Text
+        counts = dataset_info[dataset_info['dataset_name'] == node].iloc[0]
+        node_text.append(f"<b>{node}</b><br>Category: {cat}<br>Cols: {counts['column_name']}")
 
-        # 2. SQL Generation
-        with col_code:
-            if len(sel_ds) >= 2:
-                base = sel_ds[0]
-                aliases = {name: f"t{i+1}" for i, name in enumerate(sel_ds)}
-                sql = [f"SELECT TOP 100", f"    {aliases[base]}.*"]
-                sql.append(f"FROM {base} {aliases[base]}")
-                
-                # Logic to find path
-                joined = {base}
-                G_temp = nx.Graph()
-                all_joins = find_pk_fk_joins(df)
-                for _, r in all_joins.iterrows(): G_temp.add_edge(r['Source'], r['Target'], label=r['Key'])
-                
-                for i in range(1, len(sel_ds)):
-                    curr = sel_ds[i]
-                    connected = False
-                    for existing in joined:
-                        if G_temp.has_edge(curr, existing):
-                            col = G_temp[curr][existing]['label']
-                            sql.append(f"LEFT JOIN {curr} {aliases[curr]} ON {aliases[existing]}.{col} = {aliases[curr]}.{col}")
-                            joined.add(curr)
-                            connected = True
-                            break
-                    if not connected:
-                        sql.append(f"CROSS JOIN {curr} {aliases[curr]} -- ⚠️ No Direct Link Found")
-                        joined.add(curr)
-                        
-                st.code("\n".join(sql), language="sql")
-            else:
-                st.info("Select 2+ datasets to build SQL.")
+    # Trace: Nodes
+    node_trace = go.Scatter(
+        x=node_x, y=node_y,
+        mode='markers',
+        hoverinfo='text',
+        hovertext=node_text,
+        marker=dict(
+            color=node_color, 
+            size=node_size, 
+            line=node_line[0] if len(node_line)==1 else node_line
+        )
+    )
 
-# ----------------------------------------------------
-# TAB 3: FULL AI CHAT (From V4)
-# ----------------------------------------------------
-with tab_ai:
-    st.subheader("🤖 AI Data Analyst")
+    # 6. Final Layout
+    fig = go.Figure(
+        data=[edge_trace, label_trace, node_trace],
+        layout=go.Layout(
+            showlegend=False,
+            hovermode='closest',
+            margin=dict(b=0, l=0, r=0, t=0),
+            xaxis=dict(showgrid=False, zeroline=False, visible=False),
+            yaxis=dict(showgrid=False, zeroline=False, visible=False),
+            plot_bgcolor='rgba(0,0,0,0)',
+            paper_bgcolor='rgba(0,0,0,0)',
+            height=700
+        )
+    )
+    return fig
+
+# =============================================================================
+# 6. SQL BUILDER ENGINE
+# =============================================================================
+
+def generate_manual_sql(selected_datasets: List[str], df: pd.DataFrame) -> str:
+    """
+    Generates a deterministic SQL JOIN query based on the graph relationships.
+    Uses a Greedy approach to connect new tables to the existing cluster.
+    """
+    if len(selected_datasets) < 2:
+        return "-- Please select at least 2 datasets to generate a JOIN."
     
-    if not st.session_state['authenticated']:
-        st.warning("Please log in via Sidebar.")
-    else:
-        # Chat Settings
-        with st.expander("Settings", expanded=False):
-            provider = st.radio("Model", ["OpenAI (GPT-4o)", "xAI (Grok)"], horizontal=True)
-            
-            # API Key Logic
-            if "OpenAI" in provider:
-                key_name = "openai_api_key"
-                base_url = None; model = "gpt-4o"
-            else:
-                key_name = "xai_api_key"
-                base_url = "https://api.x.ai/v1"; model = "grok-2-1212"
-                
-            api_key = st.secrets.get(key_name)
-            if not api_key: api_key = st.text_input(f"Enter {key_name}", type="password")
+    # 1. Build the Full Connection Graph
+    G_full = nx.Graph()
+    joins = get_joins(df)
+    for _, r in joins.iterrows():
+        # Add edge between datasets with the Key as the attribute
+        G_full.add_edge(r['dataset_name_fk'], r['dataset_name_pk'], key=r['column_name'])
 
-        # Chat UI
-        if "messages" not in st.session_state: st.session_state.messages = []
-        for m in st.session_state.messages:
-            with st.chat_message(m["role"]): st.markdown(m["content"])
+    # 2. Initialize Query
+    base_table = selected_datasets[0]
+    aliases = {ds: f"t{i+1}" for i, ds in enumerate(selected_datasets)}
+    
+    sql_lines = [f"SELECT TOP 100", f"    {aliases[base_table]}.*"]
+    sql_lines.append(f"FROM {base_table} {aliases[base_table]}")
+    
+    # Set of tables already added to the query
+    joined_tables = {base_table}
+    
+    # 3. Iterate through remaining tables
+    remaining_tables = selected_datasets[1:]
+    
+    for current_table in remaining_tables:
+        # Try to find a direct connection to ANY table already in the join
+        found_connection = False
+        
+        for existing_table in joined_tables:
+            if G_full.has_edge(current_table, existing_table):
+                # We found a path!
+                key = G_full[current_table][existing_table]['key']
+                
+                # Write the LEFT JOIN
+                sql_lines.append(
+                    f"LEFT JOIN {current_table} {aliases[current_table]} "
+                    f"ON {aliases[existing_table]}.{key} = {aliases[current_table]}.{key}"
+                )
+                
+                joined_tables.add(current_table)
+                found_connection = True
+                break
+        
+        if not found_connection:
+            # Fallback if no direct FK/PK relationship exists
+            sql_lines.append(
+                f"CROSS JOIN {current_table} {aliases[current_table]} "
+                f"-- ⚠️ No direct relationship found to existing tables"
+            )
+            joined_tables.add(current_table)
             
-        if prompt := st.chat_input("Ask about the data..."):
-            if not api_key: st.error("No API Key"); st.stop()
+    return "\n".join(sql_lines)
+
+# =============================================================================
+# 7. MAIN APP LOGIC
+# =============================================================================
+
+def main():
+    df = load_data()
+
+    # --- SIDEBAR ---
+    with st.sidebar:
+        st.title("🌌 Data Universe")
+        
+        # Navigation
+        view = st.radio("Navigation", ["Universe Map", "Schema Explorer", "AI Architect"], label_visibility="collapsed")
+        st.divider()
+        
+        if not df.empty:
+            st.caption(f"Loaded {df['dataset_name'].nunique()} Datasets")
+        
+        # Scraper Admin
+        with st.expander("⚙️ Admin / Update Data"):
+            txt = st.text_area("URLs", value=DEFAULT_URLS, height=100)
+            if st.button("Run Scraper"):
+                urls = [u.strip() for u in txt.split('\n') if u.startswith('http')]
+                scrape_and_save(urls)
+                load_data.clear()
+                st.rerun()
+        
+        # Authentication
+        if st.session_state['authenticated']:
+            st.success("Authenticated")
+            if st.button("Logout"): 
+                logout()
+                st.rerun()
+        else:
+            st.text_input("Password", type="password", key="password_input", on_change=perform_login)
+
+    # Check Data Load
+    if df.empty:
+        st.title("Welcome")
+        st.warning("No data loaded. Please use the Sidebar to scrape the KB articles.")
+        st.stop()
+
+    # --- VIEW 1: UNIVERSE MAP ---
+    if view == "Universe Map":
+        st.subheader("Interactive Data Map")
+        
+        # Map Controls
+        col_search, col_stats = st.columns([3, 1])
+        with col_search:
+            all_ds = ["None"] + sorted(df['dataset_name'].unique())
+            target = st.selectbox("🎯 Target Dataset (Select to trace connections)", all_ds)
+            target_val = None if target == "None" else target
+        
+        with col_stats:
+            if target_val:
+                row_cnt = len(df[df['dataset_name'] == target_val])
+                st.metric("Column Count", row_cnt)
+            else:
+                st.metric("Total Datasets", df['dataset_name'].nunique())
+
+        # Split View
+        c1, c2 = st.columns([3, 1])
+        
+        with c1:
+            fig = create_hybrid_map(df, target_val)
+            st.plotly_chart(fig, use_container_width=True)
             
-            st.session_state.messages.append({"role": "user", "content": prompt})
-            with st.chat_message("user"): st.markdown(prompt)
+        with c2:
+            if target_val:
+                st.markdown(f"### {target_val}")
+                ds_data = df[df['dataset_name'] == target_val].iloc[0]
+                st.caption(f"Category: {ds_data['category']}")
+                
+                if ds_data['url']: 
+                    st.link_button("View Docs", ds_data['url'])
+                
+                st.markdown("#### Key Fields")
+                subset = df[df['dataset_name'] == target_val]
+                pks = subset[subset['is_primary_key']]['column_name'].tolist()
+                fks = subset[subset['is_foreign_key']]['column_name'].tolist()
+                
+                if pks: st.markdown(f"🔑 **PK:** {', '.join(pks)}")
+                if fks: st.markdown(f"🔗 **FK:** {', '.join(fks)}")
+                
+                with st.expander("Full Schema"):
+                    st.dataframe(subset[['column_name', 'data_type']], hide_index=True)
+            else:
+                st.info("Select a dataset on the map or dropdown to view details.")
+
+    # --- VIEW 2: SCHEMA EXPLORER ---
+    elif view == "Schema Explorer":
+        st.subheader("🔎 Schema Search & SQL Builder")
+        
+        c_search, c_sel = st.columns(2)
+        with c_search:
+            search = st.text_input("Find Column", placeholder="e.g. OrgUnitId")
+            if search:
+                hits = df[df['column_name'].str.contains(search, case=False)]
+                if not hits.empty:
+                    st.dataframe(hits[['dataset_name', 'column_name', 'data_type', 'category']], use_container_width=True, height=200)
+                else:
+                    st.warning("No matches found.")
+        
+        with c_sel:
+            sel_ds = st.multiselect("Select Datasets for SQL Builder", sorted(df['dataset_name'].unique()))
+
+        if sel_ds:
+            st.divider()
+            c_schema, c_sql = st.columns(2)
             
-            with st.chat_message("assistant"):
-                with st.spinner("Thinking..."):
+            with c_schema:
+                st.markdown("#### 📋 Field Comparison")
+                sub = df[df['dataset_name'].isin(sel_ds)]
+                st.dataframe(sub[['dataset_name', 'column_name', 'data_type', 'is_primary_key', 'is_foreign_key']], use_container_width=True)
+            
+            with c_sql:
+                st.markdown("#### ⚡ Generated SQL")
+                sql_code = generate_manual_sql(sel_ds, df)
+                st.code(sql_code, language="sql")
+
+    # --- VIEW 3: AI ARCHITECT ---
+    elif view == "AI Architect":
+        st.subheader("🤖 Data Architect Assistant")
+        
+        if not st.session_state['authenticated']:
+            st.warning("🔒 Login required to use AI features.")
+            st.stop()
+        
+        c_set, c_chat = st.columns([1, 3])
+        
+        with c_set:
+            st.markdown("#### AI Settings")
+            prov = st.selectbox("Provider", ["OpenAI", "xAI"])
+            key = st.text_input("API Key", type="password")
+            use_full = st.checkbox("Use Full Database Context", value=True, help="Sends entire schema to AI (more expensive, smarter).")
+            
+            if st.button("Clear Chat"): 
+                st.session_state.messages = []
+                st.rerun()
+
+        with c_chat:
+            # Display History
+            for m in st.session_state.messages:
+                with st.chat_message(m["role"]): 
+                    st.markdown(m["content"])
+                    
+            if prompt := st.chat_input("Ask a question (e.g., 'How do I link Grades to Users?')..."):
+                st.session_state.messages.append({"role": "user", "content": prompt})
+                with st.chat_message("user"): st.markdown(prompt)
+                
+                if key:
                     try:
-                        # Context: Use target if selected in Tab 1, else generic
-                        target_ctx = df[df['dataset_name'] == target].to_csv() if 'target' in locals() and target != "None" else df.head(30).to_csv()
+                        # Build Context
+                        if use_full:
+                            # Optimized summary for tokens
+                            ctx = df.groupby('dataset_name').apply(
+                                lambda x: f"{x.name}: {','.join(x['column_name'])}"
+                            ).str.cat(sep="\n")
+                            ctx_head = "FULL DATABASE SCHEMA"
+                        else:
+                            ctx = df.head(50).to_csv()
+                            ctx_head = "PARTIAL SAMPLE"
+
+                        # API Configuration
+                        if prov == "xAI":
+                            client = openai.OpenAI(api_key=key, base_url="https://api.x.ai/v1")
+                            model = "grok-2-1212"
+                        else:
+                            client = openai.OpenAI(api_key=key)
+                            model = "gpt-4o"
                         
-                        client = openai.OpenAI(api_key=api_key, base_url=base_url)
+                        # Call API
                         resp = client.chat.completions.create(
                             model=model,
                             messages=[
-                                {"role": "system", "content": f"Data Expert. Context:\n{target_ctx}"},
+                                {"role": "system", "content": f"You are a Brightspace SQL Expert. Context ({ctx_head}):\n{ctx[:60000]}"},
                                 {"role": "user", "content": prompt}
                             ]
                         )
                         reply = resp.choices[0].message.content
-                        st.markdown(reply)
+                        
+                        # Save & Display
                         st.session_state.messages.append({"role": "assistant", "content": reply})
+                        st.rerun()
+                        
                     except Exception as e:
-                        st.error(str(e))
+                        st.error(f"AI Error: {str(e)}")
+                else:
+                    st.error("Please provide an API Key.")
+
+if __name__ == "__main__":
+    main()
