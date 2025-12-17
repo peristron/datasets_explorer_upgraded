@@ -1,4 +1,4 @@
-# streamlit run dataset_explorer_upgraded_v2.py
+# streamlit run dataset_explorer_fixed.py
 import streamlit as st
 import pandas as pd
 import os
@@ -173,34 +173,22 @@ def scrape_and_save_from_list(url_list):
 @st.cache_data
 def load_data():
     if os.path.exists('dataset_metadata.csv'):
+        # Check if file is empty or too small
+        if os.path.getsize('dataset_metadata.csv') < 10:
+            return pd.DataFrame()
         return pd.read_csv('dataset_metadata.csv').fillna('')
     return pd.DataFrame()
 
 @st.cache_data
 def find_pk_fk_joins(df, selected_datasets=None):
-    """
-    Finds joins. 
-    If selected_datasets is provided, filters for those.
-    If None, returns ALL relationships (for global map).
-    """
     if df.empty: return pd.DataFrame()
-    
     pks = df[df['is_primary_key'] == True]
     fks = df[df['is_foreign_key'] == True]
-    
-    if selected_datasets:
-        fks = fks[fks['dataset_name'].isin(selected_datasets)]
-    
+    if selected_datasets: fks = fks[fks['dataset_name'].isin(selected_datasets)]
     if pks.empty or fks.empty: return pd.DataFrame()
-    
-    # Merge on column name
     merged = pd.merge(fks, pks, on='column_name', suffixes=('_fk', '_pk'))
-    
-    # Filter out self-joins if desired (though sometimes valid in hierarchy)
     joins = merged[merged['dataset_name_fk'] != merged['dataset_name_pk']]
-    
     if joins.empty: return pd.DataFrame()
-    
     result = joins[['dataset_name_fk', 'column_name', 'dataset_name_pk', 'category_pk', 'category_fk']]
     result.columns = ['Source Dataset', 'Join Column', 'Target Dataset', 'Target Category', 'Source Category']
     return result.drop_duplicates().reset_index(drop=True)
@@ -211,26 +199,15 @@ def find_pk_fk_joins(df, selected_datasets=None):
 
 @st.cache_data
 def build_constellation_map(df, show_connections=False):
-    """
-    Builds the 'Galaxy' map where Categories are central stars and Datasets orbit them.
-    """
     categories = sorted(df['category'].unique())
     datasets = df[['dataset_name', 'category', 'description']].drop_duplicates('dataset_name')
-    
     G = nx.Graph()
     
-    # 1. Create Layout Coordinates Manually for "Solar System" effect
     pos = {}
-    node_colors = []
-    node_sizes = []
-    node_texts = []
-    node_types = []
-    
+    node_colors, node_sizes, node_texts, node_types = [], [], [], []
     center_x, center_y = 0, 0
-    cat_radius = 10 # Radius of the category ring
-    ds_radius = 2   # Radius of datasets around their category
+    cat_radius, ds_radius = 10, 2
     
-    # Add Categories
     angle_step = 2 * math.pi / len(categories) if categories else 1
     
     for i, cat in enumerate(categories):
@@ -240,12 +217,11 @@ def build_constellation_map(df, show_connections=False):
         pos[cat] = (cx, cy)
         
         G.add_node(cat, type='category')
-        node_colors.append('#FFD700') # Gold for categories
+        node_colors.append('#FFD700') 
         node_sizes.append(30)
         node_texts.append(f"<b>Category:</b> {cat}")
         node_types.append('category')
         
-        # Add Datasets for this category
         cat_datasets = datasets[datasets['category'] == cat]
         ds_count = len(cat_datasets)
         if ds_count > 0:
@@ -255,32 +231,28 @@ def build_constellation_map(df, show_connections=False):
                 ds_angle = j * ds_angle_step
                 dx = cx + ds_radius * math.cos(ds_angle)
                 dy = cy + ds_radius * math.sin(ds_angle)
-                
-                # Jitter slightly to avoid perfect overlap if logic fails
                 pos[ds_name] = (dx, dy)
                 G.add_node(ds_name, type='dataset')
-                G.add_edge(cat, ds_name, color='#444444', width=1) # Link to category
+                G.add_edge(cat, ds_name)
                 
-                node_colors.append('#00CCFF') # Blue for datasets
+                node_colors.append('#00CCFF')
                 node_sizes.append(10)
                 desc = str(row['description'])[:100] + "..." if len(str(row['description'])) > 100 else str(row['description'])
                 node_texts.append(f"<b>Dataset:</b> {ds_name}<br><i>{desc}</i>")
                 node_types.append('dataset')
 
-    # Add PK/FK connections if requested
     edge_x, edge_y, edge_colors = [], [], []
-    
-    # Draw structural edges (Category -> Dataset)
+    # Structural edges
     for u, v in G.edges():
-        x0, y0 = pos[u]
-        x1, y1 = pos[v]
-        edge_x.extend([x0, x1, None])
-        edge_y.extend([y0, y1, None])
-        edge_colors.append('#333333') # Faint lines for hierarchy
+        if u in pos and v in pos:
+            x0, y0 = pos[u]
+            x1, y1 = pos[v]
+            edge_x.extend([x0, x1, None])
+            edge_y.extend([y0, y1, None])
 
-    # Draw Logic Edges (PK/FK)
+    # Connection edges (optional)
     if show_connections:
-        joins = find_pk_fk_joins(df) # Get all joins
+        joins = find_pk_fk_joins(df)
         for _, row in joins.iterrows():
             s, t = row['Source Dataset'], row['Target Dataset']
             if s in pos and t in pos:
@@ -288,45 +260,27 @@ def build_constellation_map(df, show_connections=False):
                 x1, y1 = pos[t]
                 edge_x.extend([x0, x1, None])
                 edge_y.extend([y0, y1, None])
-                edge_colors.append('rgba(255, 255, 255, 0.1)') # Very faint white for connections
 
-    # Create Plotly Traces
     edge_trace = go.Scatter(
-        x=edge_x, y=edge_y,
-        line=dict(width=0.5, color='#555'),
-        hoverinfo='none',
-        mode='lines'
+        x=edge_x, y=edge_y, line=dict(width=0.5, color='#555'),
+        hoverinfo='none', mode='lines'
     )
 
     node_x = [pos[n][0] for n in G.nodes()]
     node_y = [pos[n][1] for n in G.nodes()]
 
     node_trace = go.Scatter(
-        x=node_x, y=node_y,
-        mode='markers',
-        hoverinfo='text',
-        text=node_texts,
-        marker=dict(
-            showscale=False,
-            color=node_colors,
-            size=node_sizes,
-            line_width=1,
-            line_color='white'
-        )
+        x=node_x, y=node_y, mode='markers', hoverinfo='text', text=node_texts,
+        marker=dict(showscale=False, color=node_colors, size=node_sizes, line_width=1, line_color='white')
     )
     
-    # Add text labels for categories only (to reduce clutter)
     cat_x = [pos[n][0] for n in G.nodes() if G.nodes[n]['type'] == 'category']
     cat_y = [pos[n][1] for n in G.nodes() if G.nodes[n]['type'] == 'category']
     cat_text = [n for n in G.nodes() if G.nodes[n]['type'] == 'category']
     
     text_trace = go.Scatter(
-        x=cat_x, y=cat_y,
-        mode='text',
-        text=cat_text,
-        textposition="top center",
-        textfont=dict(color='#FFD700', size=12, family="sans serif"),
-        hoverinfo='none'
+        x=cat_x, y=cat_y, mode='text', text=cat_text, textposition="top center",
+        textfont=dict(color='#FFD700', size=12, family="sans serif"), hoverinfo='none'
     )
 
     fig = go.Figure(data=[edge_trace, node_trace, text_trace],
@@ -336,8 +290,7 @@ def build_constellation_map(df, show_connections=False):
                 showlegend=False,
                 hovermode='closest',
                 margin=dict(b=20,l=5,r=5,t=40),
-                plot_bgcolor='rgb(10,10,10)', # Dark background space theme
-                paper_bgcolor='rgb(10,10,10)',
+                plot_bgcolor='rgb(10,10,10)', paper_bgcolor='rgb(10,10,10)',
                 xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
                 yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
                 height=750
@@ -432,6 +385,8 @@ with st.sidebar:
             with st.spinner(f"Scraping {len(url_list)} pages..."):
                 df_new = scrape_and_save_from_list(url_list)
                 st.session_state['scrape_msg'] = f"Success: {df_new['dataset_name'].nunique()} Datasets"
+                # !!! CRITICAL FIX: Clear cache so the new file is read on rerun !!!
+                load_data.clear()
                 st.rerun()
 
     # 2. AI Login
@@ -456,14 +411,15 @@ if 'scrape_msg' in st.session_state:
 
 if df.empty:
     st.title("Brightspace Datasets Explorer")
-    st.warning("👈 Please use the sidebar scraper to load data first.")
+    st.warning("👈 Please use the **Sidebar Scraper** to load data first.")
+    st.markdown("Once the data is scraped, the exploration tabs will appear here.")
     st.stop()
 
 # TABS ARCHITECTURE
 tab_focus, tab_map, tab_ai = st.tabs(["🔍 Focus Explorer", "🌌 The Galaxy Map", "🤖 AI Analyst"])
 
 # ----------------------------------------------------
-# TAB 1: FOCUS EXPLORER (Original Functionality)
+# TAB 1: FOCUS EXPLORER
 # ----------------------------------------------------
 with tab_focus:
     st.subheader("Filter & Analyze Specific Datasets")
@@ -530,17 +486,13 @@ with tab_focus:
                 sql = [f"SELECT TOP 100", f"    {aliases[base_table]}.*"]
                 sql.append(f"FROM {base_table} {aliases[base_table]}")
                 
-                # Simple heuristic join generation based on graph edges
-                # (Re-calculating logic briefly for SQL text)
                 joined = {base_table}
                 G_temp = nx.Graph() 
                 if not join_data.empty:
                     for _, r in join_data.iterrows(): G_temp.add_edge(r['Source Dataset'], r['Target Dataset'], label=r['Join Column'])
                 
-                # Traverse selection
                 for i in range(1, len(selected_datasets)):
                     curr = selected_datasets[i]
-                    # Find connection to anything in 'joined'
                     connected = False
                     for existing in joined:
                         if G_temp.has_edge(curr, existing):
@@ -558,7 +510,7 @@ with tab_focus:
                 st.info("Select 2+ connected datasets to generate SQL.")
 
 # ----------------------------------------------------
-# TAB 2: THE GALAXY MAP (New Feature)
+# TAB 2: THE GALAXY MAP
 # ----------------------------------------------------
 with tab_map:
     st.subheader("🌌 The Dataset Constellation")
@@ -575,14 +527,13 @@ with tab_map:
         m3.metric("Categories", df['category'].nunique())
 
     # Build the big map
-    # We pass the whole dataframe to the map builder
     fig_map = build_constellation_map(df, show_connections=show_conns)
     st.plotly_chart(fig_map, use_container_width=True)
     
     st.info("💡 **Tip:** Hover over blue dots to see dataset descriptions. Gold dots are Categories.")
 
 # ----------------------------------------------------
-# TAB 3: AI ANALYST (Existing Logic)
+# TAB 3: AI ANALYST
 # ----------------------------------------------------
 with tab_ai:
     st.subheader("🤖 AI Data Assistant")
@@ -610,11 +561,9 @@ with tab_ai:
         # Chat Interface
         if "messages" not in st.session_state: st.session_state.messages = []
         
-        # Display History
         for message in st.session_state.messages:
             with st.chat_message(message["role"]): st.markdown(message["content"])
             
-        # Input
         if prompt := st.chat_input("Ask about joins, specific columns, or data definitions..."):
             if not api_key:
                 st.error("API Key missing.")
@@ -626,13 +575,10 @@ with tab_ai:
             with st.chat_message("assistant"):
                 with st.spinner(f"Consulting {model_name}..."):
                     try:
-                        # Context Building
                         if use_full_context:
-                            # Optimized context for full DB
                             schema_summary = df.groupby('dataset_name').apply(lambda x: f"{x.name}: {', '.join(x['column_name'].tolist())}").str.cat(sep="\n")
                             context = f"Full Schema Summary:\n{schema_summary}"
                         else:
-                            # Detailed context for selection
                             target_df = df[df['dataset_name'].isin(selected_datasets)] if selected_datasets else df.head(50)
                             context = target_df.to_csv(index=False)
                         
@@ -657,7 +603,6 @@ with tab_ai:
                         
                         reply = response.choices[0].message.content
                         
-                        # Cost tracking (approximate)
                         if hasattr(response, 'usage'):
                             st.session_state['total_tokens'] += response.usage.total_tokens
                             
