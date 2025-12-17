@@ -1,0 +1,8 @@
+streamlit
+pandas
+requests
+beautifulsoup4
+networkx
+plotly
+openai>=1.0.0
+numpy
