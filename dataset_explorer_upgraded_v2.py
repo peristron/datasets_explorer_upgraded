@@ -1,4 +1,4 @@
-# streamlit run dataset_explorer_v15.py
+# streamlit run dataset_explorer_v17.py
 import streamlit as st
 import pandas as pd
 import os
@@ -73,7 +73,29 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # =============================================================================
-# 2. SESSION STATE MANAGEMENT
+# 2. PRICING REGISTRY (AI MODELS)
+# =============================================================================
+
+# Define supported models and their costs (USD per 1M tokens)
+PRICING_REGISTRY = {
+    # --- xAI Models ---
+    "grok-2-1212":             {"in": 2.00, "out": 10.00, "provider": "xAI"},
+    "grok-2-vision-1212":      {"in": 2.00, "out": 10.00, "provider": "xAI"},
+    "grok-3":                  {"in": 3.00, "out": 15.00, "provider": "xAI"},
+    "grok-3-mini":             {"in": 0.30, "out": 0.50,  "provider": "xAI"},
+    "grok-4-0709":             {"in": 3.00, "out": 15.00, "provider": "xAI"},
+    "grok-4-1-fast-reasoning": {"in": 0.20, "out": 0.50,  "provider": "xAI"},
+    
+    # --- OpenAI Models ---
+    "gpt-4o":                  {"in": 2.50, "out": 10.00, "provider": "OpenAI"},
+    "gpt-4o-mini":             {"in": 0.15, "out": 0.60,  "provider": "OpenAI"},
+    "gpt-5-mini":              {"in": 0.25, "out": 2.00,  "provider": "OpenAI"},
+    "gpt-5.1":                 {"in": 1.25, "out": 10.00, "provider": "OpenAI"},
+    "gpt-5.2":                 {"in": 1.75, "out": 14.00, "provider": "OpenAI"},
+}
+
+# =============================================================================
+# 3. SESSION STATE MANAGEMENT
 # =============================================================================
 
 def init_session_state():
@@ -83,7 +105,9 @@ def init_session_state():
         'auth_error': False,
         'messages': [],
         'view_mode': 'Universe Map',
-        'scrape_status': None
+        'scrape_status': None,
+        'total_cost': 0.0,
+        'total_tokens': 0
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -92,11 +116,11 @@ def init_session_state():
 init_session_state()
 
 # =============================================================================
-# 3. AUTHENTICATION LOGIC (FIXED FOR CASE SENSITIVITY)
+# 4. AUTHENTICATION LOGIC (CASE INSENSITIVE)
 # =============================================================================
 
-def get_secret(key_name):
-    """Helper to check both lowercase and uppercase keys in secrets."""
+def get_secret(key_name: str) -> Optional[str]:
+    """Retrieves a secret, checking both lowercase and uppercase variations."""
     return st.secrets.get(key_name) or st.secrets.get(key_name.upper())
 
 def perform_login():
@@ -124,7 +148,7 @@ def logout():
     st.session_state['messages'] = [] # Clear chat on logout
 
 # =============================================================================
-# 4. DATA LAYER (SCRAPER & STORAGE)
+# 5. DATA LAYER (SCRAPER & STORAGE)
 # =============================================================================
 
 DEFAULT_URLS = """
@@ -302,7 +326,7 @@ def get_possible_joins(df: pd.DataFrame) -> pd.DataFrame:
     return joins
 
 # =============================================================================
-# 5. VISUALIZATION ENGINE (ORBITAL MAP)
+# 6. VISUALIZATION ENGINE (ORBITAL MAP)
 # =============================================================================
 
 @st.cache_data
@@ -391,7 +415,7 @@ def create_orbital_map(df: pd.DataFrame, target_node: str = None) -> go.Figure:
                 # Visual Logic for Dataset
                 if target_node:
                     if ds_name == target_node:
-                        # TARGET - INCREASED VISIBILITY
+                        # TARGET - INCREASED VISIBILITY (V14 FIX)
                         node_color.append('#00FF00') # Bright Green
                         node_size.append(50)         # Large Size
                         node_line_width.append(5); node_line_color.append('white') # Thick Border
@@ -471,45 +495,67 @@ def create_orbital_map(df: pd.DataFrame, target_node: str = None) -> go.Figure:
     return fig
 
 # =============================================================================
-# 6. SQL BUILDER ENGINE
+# 7. SQL BUILDER ENGINE
 # =============================================================================
 
 def generate_manual_sql(selected_datasets: List[str], df: pd.DataFrame) -> str:
-    """Generates a deterministic SQL JOIN query."""
+    """
+    Generates a deterministic SQL JOIN query based on the graph relationships.
+    Uses a 'Greedy' approach: connect each new table to the existing joined cluster.
+    """
     if len(selected_datasets) < 2:
-        return "-- Please select at least 2 datasets."
+        return "-- Please select at least 2 datasets to generate a JOIN."
     
-    # 1. Build Graph
+    # 1. Build the Full Connection Graph
     G_full = nx.Graph()
     joins = get_possible_joins(df)
     for _, r in joins.iterrows():
+        # Store the Join Key as an edge attribute
         G_full.add_edge(r['dataset_name_fk'], r['dataset_name_pk'], key=r['column_name'])
 
-    # 2. Init Query
-    base = selected_datasets[0]
+    # 2. Initialize Query
+    base_table = selected_datasets[0]
+    # Create simple aliases (t1, t2, etc.)
     aliases = {ds: f"t{i+1}" for i, ds in enumerate(selected_datasets)}
     
-    sql = [f"SELECT TOP 100", f"    {aliases[base]}.*"]
-    sql.append(f"FROM {base} {aliases[base]}")
+    sql_lines = [f"SELECT TOP 100", f"    {aliases[base_table]}.*"]
+    sql_lines.append(f"FROM {base_table} {aliases[base_table]}")
     
-    joined = {base}
-    for curr in selected_datasets[1:]:
-        found = False
-        for existing in joined:
-            if G_full.has_edge(curr, existing):
-                key = G_full[curr][existing]['key']
-                sql.append(f"LEFT JOIN {curr} {aliases[curr]} ON {aliases[existing]}.{key} = {aliases[curr]}.{key}")
-                joined.add(curr)
-                found = True
+    # Set of tables already added to the query
+    joined_tables = {base_table}
+    
+    # 3. Iterate through remaining tables
+    remaining_tables = selected_datasets[1:]
+    
+    for current_table in remaining_tables:
+        found_connection = False
+        
+        # Check if current_table connects to ANY table already in the query
+        for existing_table in joined_tables:
+            if G_full.has_edge(current_table, existing_table):
+                key = G_full[current_table][existing_table]['key']
+                
+                sql_lines.append(
+                    f"LEFT JOIN {current_table} {aliases[current_table]} "
+                    f"ON {aliases[existing_table]}.{key} = {aliases[current_table]}.{key}"
+                )
+                
+                joined_tables.add(current_table)
+                found_connection = True
                 break
-        if not found:
-            sql.append(f"CROSS JOIN {curr} {aliases[curr]} -- ⚠️ No direct link")
-            joined.add(curr)
+        
+        if not found_connection:
+            # Fallback for unconnected tables
+            sql_lines.append(
+                f"CROSS JOIN {current_table} {aliases[current_table]} "
+                f"-- ⚠️ No direct relationship found in metadata"
+            )
+            joined_tables.add(current_table)
             
-    return "\n".join(sql)
+    return "\n".join(sql_lines)
 
 # =============================================================================
-# 7. VIEW CONTROLLERS (MODULAR UI)
+# 8. VIEW CONTROLLERS (MODULAR UI)
 # =============================================================================
 
 def render_sidebar(df: pd.DataFrame) -> str:
@@ -645,7 +691,7 @@ def render_schema_view(df: pd.DataFrame):
             st.code(sql_code, language="sql")
 
 def render_ai_view(df: pd.DataFrame):
-    """Renders the AI Chat Interface."""
+    """Renders the AI Chat Interface with Dynamic Cost Logic."""
     st.subheader("🤖 Data Architect Assistant")
     
     if not st.session_state['authenticated']:
@@ -655,20 +701,39 @@ def render_ai_view(df: pd.DataFrame):
     c_set, c_chat = st.columns([1, 3])
     
     with c_set:
-        st.markdown("#### AI Settings")
-        prov = st.selectbox("Provider", ["OpenAI", "xAI"])
+        st.markdown("#### Settings")
         
-        # CHECK SECRETS CASE INSENSITIVELY (Smart Login)
-        key_name = "openai_api_key" if prov == "OpenAI" else "xai_api_key"
+        # 1. Select Model directly (Provider is inferred)
+        model_options = list(PRICING_REGISTRY.keys())
+        selected_model_id = st.selectbox("Select Model", model_options, index=3) # Default to grok-3-mini
+        
+        # Get metadata for selected model
+        model_info = PRICING_REGISTRY[selected_model_id]
+        provider = model_info['provider']
+        
+        st.caption(f"Provider: **{provider}**")
+        st.caption(f"Input: ${model_info['in']:.2f}/1M | Output: ${model_info['out']:.2f}/1M")
+        
+        # 2. Key Check (Dynamic based on provider)
+        key_name = "openai_api_key" if provider == "OpenAI" else "xai_api_key"
         secret_key = get_secret(key_name)
         
         if secret_key:
-            st.success("✅ Key loaded from Secrets")
+            st.success(f"✅ {provider} Key Loaded")
             api_key = secret_key
         else:
-            api_key = st.text_input("API Key", type="password")
+            api_key = st.text_input(f"{provider} API Key", type="password")
             
-        use_full = st.checkbox("Use Full Database Context", value=True, help="Sends entire schema to AI (more expensive, smarter).")
+        use_full = st.checkbox("Full Context", value=True)
+        
+        # 3. Cost Tracker
+        with st.expander("💰 Cost Estimator", expanded=True):
+            st.metric("Total Cost", f"${st.session_state['total_cost']:.4f}")
+            st.metric("Total Tokens", f"{st.session_state['total_tokens']:,}")
+            if st.button("Reset Cost"):
+                st.session_state['total_cost'] = 0.0
+                st.session_state['total_tokens'] = 0
+                st.rerun()
         
         if st.button("Clear Chat"): 
             st.session_state.messages = []
@@ -680,7 +745,7 @@ def render_ai_view(df: pd.DataFrame):
             with st.chat_message(m["role"]): 
                 st.markdown(m["content"])
                 
-        if prompt := st.chat_input("Ask a question (e.g., 'How do I link Grades to Users?')..."):
+        if prompt := st.chat_input("Ask a question..."):
             st.session_state.messages.append({"role": "user", "content": prompt})
             with st.chat_message("user"): st.markdown(prompt)
             
@@ -688,7 +753,6 @@ def render_ai_view(df: pd.DataFrame):
                 try:
                     # Build Context
                     if use_full:
-                        # Optimized summary string to save tokens
                         ctx = df.groupby('dataset_name').apply(
                             lambda x: f"{x.name}: {','.join(x['column_name'])}"
                         ).str.cat(sep="\n")
@@ -698,23 +762,29 @@ def render_ai_view(df: pd.DataFrame):
                         ctx_head = "PARTIAL SAMPLE"
 
                     # Provider Logic
-                    if prov == "xAI":
-                        client = openai.OpenAI(api_key=api_key, base_url="https://api.x.ai/v1")
-                        model = "grok-2-1212"
-                    else:
-                        client = openai.OpenAI(api_key=api_key)
-                        model = "gpt-4o"
+                    base_url = "https://api.x.ai/v1" if provider == "xAI" else None
+                    client = openai.OpenAI(api_key=api_key, base_url=base_url)
                     
                     # Call API
-                    with st.spinner(f"Consulting {model}..."):
+                    with st.spinner(f"Consulting {selected_model_id}..."):
                         resp = client.chat.completions.create(
-                            model=model,
+                            model=selected_model_id,
                             messages=[
                                 {"role": "system", "content": f"You are a Brightspace SQL Expert. Context ({ctx_head}):\n{ctx[:60000]}"},
                                 {"role": "user", "content": prompt}
                             ]
                         )
                         reply = resp.choices[0].message.content
+                        
+                        # CALC COST
+                        if hasattr(resp, 'usage'):
+                            in_tok = resp.usage.prompt_tokens
+                            out_tok = resp.usage.completion_tokens
+                            # (tokens * price) / 1,000,000
+                            cost = (in_tok * model_info['in'] / 1_000_000) + (out_tok * model_info['out'] / 1_000_000)
+                            
+                            st.session_state['total_tokens'] += (in_tok + out_tok)
+                            st.session_state['total_cost'] += cost
                     
                     # Save & Display
                     st.session_state.messages.append({"role": "assistant", "content": reply})
@@ -723,10 +793,10 @@ def render_ai_view(df: pd.DataFrame):
                 except Exception as e:
                     st.error(f"AI Error: {str(e)}")
             else:
-                st.error("Please provide an API Key in the settings or secrets.toml.")
+                st.error(f"Please provide an API Key for {provider}.")
 
 # =============================================================================
-# 8. MAIN ORCHESTRATOR
+# 9. MAIN ORCHESTRATOR
 # =============================================================================
 
 def main():
