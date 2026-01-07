@@ -891,3 +891,50 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+def show_relationship_summary(df, dataset_name):
+    """Shows quick stats about a dataset's connectivity."""
+    joins = get_possible_joins(df)  # or find_pk_fk_joins
+    
+    outgoing = len(joins[joins['dataset_name_fk'] == dataset_name])
+    incoming = len(joins[joins['dataset_name_pk'] == dataset_name])
+    
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Outgoing FKs", outgoing, help="This dataset references other tables")
+    col2.metric("Incoming FKs", incoming, help="Other tables reference this one")
+    col3.metric("Total Connections", outgoing + incoming)
+
+def find_join_path(df, source_dataset, target_dataset):
+    """Finds the shortest path of joins between two datasets."""
+    joins = get_possible_joins(df)
+    
+    G = nx.Graph()
+    for _, r in joins.iterrows():
+        G.add_edge(r['dataset_name_fk'], r['dataset_name_pk'], 
+                  key=r['column_name'])
+    
+    try:
+        path = nx.shortest_path(G, source_dataset, target_dataset)
+        return path
+    except nx.NetworkXNoPath:
+        return None
+    except nx.NodeNotFound:
+        return None
+
+def create_relationship_matrix(df):
+    """Creates a heatmap showing which datasets connect to which."""
+    joins = get_possible_joins(df)
+    datasets = sorted(df['dataset_name'].unique())
+    
+    # Create adjacency matrix
+    matrix = pd.DataFrame(0, index=datasets, columns=datasets)
+    
+    for _, r in joins.iterrows():
+        src, tgt = r['dataset_name_fk'], r['dataset_name_pk']
+        if src in matrix.index and tgt in matrix.columns:
+            matrix.loc[src, tgt] += 1
+    
+    fig = px.imshow(matrix, 
+                   labels=dict(x="Target (PK)", y="Source (FK)", color="Connections"),
+                   color_continuous_scale="Blues")
+    return fig
