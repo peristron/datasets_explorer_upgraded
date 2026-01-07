@@ -602,12 +602,26 @@ def render_map_view(df: pd.DataFrame):
     """Renders the Interactive Galaxy Map."""
     st.subheader("Interactive Data Map")
     
-    # Control Row
+    # control Row
     col_search, col_stats = st.columns([3, 1])
     with col_search:
-        all_ds = ["None"] + sorted(df['dataset_name'].unique())
-        target = st.selectbox("🎯 Target Dataset (Select to trace connections)", all_ds)
-        target_val = None if target == "None" else target
+        all_ds = sorted(df['dataset_name'].unique())
+        
+        # adding mode selector
+        explore_mode = st.radio(
+            "Exploration Mode",
+            ["Single Target (Discovery)", "Multi-Select (Focused)"],
+            horizontal=True,
+            label_visibility="collapsed"
+        )
+        
+        if explore_mode == "Single Target (Discovery)":
+            target = st.selectbox("🎯 Target Dataset", ["None"] + all_ds)
+            target_val = None if target == "None" else target
+            multi_targets = None
+        else:
+            multi_targets = st.multiselect("Select 2+ Datasets", all_ds)
+            target_val = None
     
     with col_stats:
         if target_val:
@@ -616,7 +630,7 @@ def render_map_view(df: pd.DataFrame):
         else:
             st.metric("Total Datasets", df['dataset_name'].nunique())
 
-    # Map & Details Row
+    # map, details row
     c1, c2 = st.columns([3, 1])
     
     with c1:
