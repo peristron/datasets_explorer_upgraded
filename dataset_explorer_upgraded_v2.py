@@ -284,13 +284,68 @@ def scrape_and_save(urls: List[str]) -> pd.DataFrame:
         st.error("Scraper returned no data. Check URLs.")
         return pd.DataFrame()
 
-    # Create DataFrame
+    # make dataframe
     df = pd.DataFrame(all_data)
     df = df.fillna('')
     
-    # Clean up Text
+    # clean up text
     df['dataset_name'] = df['dataset_name'].astype(str).str.title()
     df['category'] = df['category'].astype(str).str.title()
+
+def create_focused_graph(df: pd.DataFrame, selected_datasets: List[str]) -> go.Figure:
+    """
+    Creates a graph showing only connections BETWEEN the selected datasets.
+    Complements the Discovery-focused orbital map.
+    """
+    if len(selected_datasets) < 2:
+        fig = go.Figure()
+        fig.add_annotation(text="Select 2+ datasets for Focused view", 
+                          showarrow=False, font=dict(size=16))
+        return fig
+    
+    G = nx.DiGraph()
+    joins = get_possible_joins(df)
+    
+    # adds only selected datasets as nodes
+    for ds in selected_datasets:
+        G.add_node(ds)
+    
+    # Add only edges between selected datasets
+    for _, r in joins.iterrows():
+        src, tgt = r['dataset_name_fk'], r['dataset_name_pk']
+        if src in selected_datasets and tgt in selected_datasets:
+            G.add_edge(src, tgt, key=r['column_name'])
+    
+    pos = nx.spring_layout(G, k=1.5, iterations=50)
+    
+    # Build traces (similar to CODE-BASE 1's approach)
+    edge_x, edge_y = [], []
+    for u, v in G.edges():
+        x0, y0 = pos[u]
+        x1, y1 = pos[v]
+        edge_x.extend([x0, x1, None])
+        edge_y.extend([y0, y1, None])
+    
+    node_x = [pos[n][0] for n in G.nodes()]
+    node_y = [pos[n][1] for n in G.nodes()]
+    node_text = list(G.nodes())
+    
+    edge_trace = go.Scatter(x=edge_x, y=edge_y, mode='lines', 
+                           line=dict(width=2, color='#00CCFF'))
+    node_trace = go.Scatter(x=node_x, y=node_y, mode='markers+text',
+                           text=node_text, textposition='top center',
+                           marker=dict(size=25, color='#FF4B4B'))
+    
+    fig = go.Figure(data=[edge_trace, node_trace],
+                   layout=go.Layout(
+                       showlegend=False,
+                       xaxis=dict(visible=False),
+                       yaxis=dict(visible=False),
+                       plot_bgcolor='rgba(0,0,0,0)',
+                       paper_bgcolor='rgba(0,0,0,0)',
+                       height=500
+                   ))
+    return fig
     
     # Logic Flags for Joins
     df['is_primary_key'] = df['key'].astype(str).str.contains(r'\bpk\b', case=False, regex=True)
