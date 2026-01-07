@@ -399,7 +399,10 @@ def create_orbital_map(df: pd.DataFrame, target_node: str = None) -> go.Figure:
         cat_ds = datasets[datasets['category'] == cat]
         ds_count = len(cat_ds)
         if ds_count > 0:
-            ds_radius = 4 # Distance from Category
+            # dynamic radius based on dataset count to prevent overlap
+            min_radius = 3
+            radius_per_node = 0.5
+            ds_radius = min_radius + (ds_count * radius_per_node / (2 * math.pi))
             ds_step = 2 * math.pi / ds_count
             
             for j, (_, row) in enumerate(cat_ds.iterrows()):
@@ -409,14 +412,14 @@ def create_orbital_map(df: pd.DataFrame, target_node: str = None) -> go.Figure:
                 dy = cy + ds_radius * math.sin(ds_angle)
                 pos[ds_name] = (dx, dy)
                 
-                # Add Dataset Node
+                # adding dataset node
                 node_x.append(dx); node_y.append(dy)
                 
-                # Visual Logic for Dataset
+                # visual logic for dataset
                 if target_node:
                     if ds_name == target_node:
-                        # TARGET - INCREASED VISIBILITY (V14 FIX)
-                        node_color.append('#00FF00') # Bright Green
+                        # increased visibility
+                        node_color.append('#00FF00') # bright green
                         node_size.append(50)         # Large Size
                         node_line_width.append(5); node_line_color.append('white') # Thick Border
                     elif ds_name in active_neighbors:
