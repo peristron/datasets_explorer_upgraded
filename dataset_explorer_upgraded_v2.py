@@ -284,13 +284,26 @@ def scrape_and_save(urls: List[str]) -> pd.DataFrame:
         st.error("Scraper returned no data. Check URLs.")
         return pd.DataFrame()
 
-    # make dataframe
+    # Create DataFrame
     df = pd.DataFrame(all_data)
     df = df.fillna('')
     
-    # clean up text
+    # Clean up text
     df['dataset_name'] = df['dataset_name'].astype(str).str.title()
     df['category'] = df['category'].astype(str).str.title()
+    
+    # Ensure 'key' column exists before checking PK/FK
+    if 'key' not in df.columns:
+        df['key'] = ''
+    
+    # Logic Flags for Joins
+    df['is_primary_key'] = df['key'].astype(str).str.contains(r'\bpk\b', case=False, regex=True)
+    df['is_foreign_key'] = df['key'].astype(str).str.contains(r'\bfk\b', case=False, regex=True)
+    
+    # Persist
+    df.to_csv('dataset_metadata.csv', index=False)
+    return df
+
 
 def create_focused_graph(df: pd.DataFrame, selected_datasets: List[str]) -> go.Figure:
     """
@@ -306,19 +319,20 @@ def create_focused_graph(df: pd.DataFrame, selected_datasets: List[str]) -> go.F
     G = nx.DiGraph()
     joins = get_possible_joins(df)
     
-    # adds only selected datasets as nodes
+    # Add only selected datasets as nodes
     for ds in selected_datasets:
         G.add_node(ds)
     
     # Add only edges between selected datasets
-    for _, r in joins.iterrows():
-        src, tgt = r['dataset_name_fk'], r['dataset_name_pk']
-        if src in selected_datasets and tgt in selected_datasets:
-            G.add_edge(src, tgt, key=r['column_name'])
+    if not joins.empty:
+        for _, r in joins.iterrows():
+            src, tgt = r['dataset_name_fk'], r['dataset_name_pk']
+            if src in selected_datasets and tgt in selected_datasets:
+                G.add_edge(src, tgt, key=r['column_name'])
     
     pos = nx.spring_layout(G, k=1.5, iterations=50)
     
-    # Build traces (similar to CODE-BASE 1's approach)
+    # Build traces
     edge_x, edge_y = [], []
     for u, v in G.edges():
         x0, y0 = pos[u]
@@ -346,14 +360,6 @@ def create_focused_graph(df: pd.DataFrame, selected_datasets: List[str]) -> go.F
                        height=500
                    ))
     return fig
-    
-    # Logic Flags for Joins
-    df['is_primary_key'] = df['key'].astype(str).str.contains(r'\bpk\b', case=False, regex=True)
-    df['is_foreign_key'] = df['key'].astype(str).str.contains(r'\bfk\b', case=False, regex=True)
-    
-    # Persist
-    df.to_csv('dataset_metadata.csv', index=False)
-    return df
 
 @st.cache_data
 def load_data() -> pd.DataFrame:
