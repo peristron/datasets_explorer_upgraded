@@ -697,8 +697,28 @@ def render_map_view(df: pd.DataFrame):
     # map, details row
     c1, c2 = st.columns([3, 1])
     
+    # Map & Details Row
+    c1, c2 = st.columns([3, 1])
+    
     with c1:
-        fig = create_orbital_map(df, target_val)
+        if explore_mode == "Single Target (Discovery)":
+            fig = create_orbital_map(df, target_val)
+        else:
+            # Multi-select mode uses the focused graph
+            if multi_targets and len(multi_targets) >= 2:
+                fig = create_focused_graph(df, multi_targets)
+            else:
+                fig = go.Figure()
+                fig.add_annotation(
+                    text="Please select 2+ datasets for Focused view",
+                    showarrow=False,
+                    font=dict(size=14, color='gray')
+                )
+                fig.update_layout(
+                    height=500,
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    paper_bgcolor='rgba(0,0,0,0)'
+                )
         st.plotly_chart(fig, use_container_width=True)
         
     with c2:
