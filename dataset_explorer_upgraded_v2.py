@@ -401,7 +401,18 @@ def create_orbital_map(df: pd.DataFrame, target_node: str = None) -> go.Figure:
     
     # 1. Prepare Data
     categories = sorted(df['category'].unique())
-    datasets = df[['dataset_name', 'category', 'description']].drop_duplicates('dataset_name')
+    # Ensure required columns exist
+required_cols = ['dataset_name', 'category']
+optional_cols = ['description']
+
+cols_to_use = required_cols + [c for c in optional_cols if c in df.columns]
+datasets = df[cols_to_use].drop_duplicates('dataset_name')
+
+# Later when accessing description:
+desc_short = str(row.get('description', ''))[:80]
+if desc_short:
+    desc_short += "..."
+node_text.append(f"<b>{ds_name}</b><br>{desc_short}" if desc_short else f"<b>{ds_name}</b>")
     
     # 2. Define Layout Physics (Orbit)
     pos = {}
