@@ -1156,26 +1156,21 @@ def main():
 
 
 if __name__ == "__main__":
+    # =========================================================
+    # 🍞 UPGRADE TOAST (Placed BEFORE main so it always runs)
+    # =========================================================
+    try:
+        import streamlit as st
+        # Pop-up notification
+        st.toast("📢 **New Version Available!** Check the Unified Explorer.", icon="🚀")
+        
+        # Sidebar button (sticky)
+        st.sidebar.markdown("---")
+        st.sidebar.link_button("✨ Go to Unified Explorer v2", "https://datasetsunifiedexplorer.streamlit.app/", type="primary")
+    except Exception:
+        pass
+
+    # =========================================================
+    # 🏃 RUN APP
+    # =========================================================
     main()
-
-
-
-# =========================================================
-# 🍞 UPGRADE TOAST
-# 
-try:
-    # brief wait so it animates in after page load
-    import time
-    
-    # pop-up notification in the top right
-    st.toast("📢 **New Version Available!** Check the Unified Explorer.", icon="🚀")
-    
-    # and add button to sidebar as a fallback reference
-    st.sidebar.markdown("---")
-    st.sidebar.link_button("✨ Go to Unified Explorer v2", "https://datasetsunifiedexplorer.streamlit.app/", type="primary")
-    
-except Exception:
-    pass
-
-
-
